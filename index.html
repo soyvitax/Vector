@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VitaxOS - Vector AI Suite</title>
+    <!-- Importar FontAwesome para iconos modernos -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="style.css">
+    
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+        import { getFirestore, collection, addDoc, getDocs, query, orderBy } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+        import { getStorage, ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-storage.js";
+
+        const firebaseConfig = {
+            apiKey: "TU_FIREBASE_API_KEY",
+            authDomain: "tu-proyecto.firebaseapp.com",
+            projectId: "tu-proyecto",
+            storageBucket: "tu-proyecto.appspot.com",
+            messagingSenderId: "TU_MESSAGING_SENDER_ID",
+            appId: "TU_APP_ID"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const storage = getStorage(app);
+
+        const GEMINI_API_KEY = "TU_API_KEY_DE_AI_STUDIO";
+        const MODEL_NAME = "gemini-2.5-flash";
+
+        let currentUserId = null;
+
+        const authScreen = document.getElementById("auth-screen");
+        const appScreen = document.getElementById("app-screen");
+        const chatContainer = document.getElementById("chat-container");
+        const userInput = document.getElementById("user-input");
+        const sendBtn = document.getElementById("send-btn");
+        const codeEditor = document.getElementById("code-editor");
+        const runCodeBtn = document.getElementById("run-code-btn");
+        const fileInput = document.getElementById("file-input");
+
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                currentUserId = user.uid;
+                authScreen.style.display = "none";
+                appScreen.style.display = "flex";
+            } else {
+                currentUserId = null;
+                authScreen.style.display = "flex";
+                appScreen.style.display = "none";
+            }
+        });
+
+        window.handleLogin = async () => {
+            const email = document.getElementById("auth-email").value;
+            const pass = document.getElementById("auth-pass").value;
+            try { await signInWithEmailAndPassword(auth, email, pass); } catch (e) { alert("Error: " + e.message); }
+        };
+
+        window.handleRegister = async () => {
+            const email = document.getElementById("auth-email").value;
+            const pass = document.getElementById("auth-pass").value;
+            try { await createUserWithEmailAndPassword(auth, email, pass); } catch (e) { alert("Error: " + e.message); }
+        };
+
+        window.handleLogout = () => signOut(auth);
+
+        function appendMessage(sender, text) {
+            const messageDiv = document.createElement("div");
+            messageDiv.classList.add("message", sender);
+
+            let senderName = sender === 'user' ? 'Tú' : 'Vector';
+            let extraTools = '';
+            
+            if (sender === 'ai') {
+                extraTools = `
+                    <div class="msg-tools">
+                        <button onclick="copyText(this)"><i class="fa-solid fa-copy"></i> Copiar</button>
+                        <button onclick="speakText(this)"><i class="fa-solid fa-volume-high"></i> Escuchar</button>
+                        <button onclick="loadCodeIntoEditor(this)" class="load-editor-btn"><i class="fa-solid fa-bolt"></i> Cargar en Editor</button>
+                        <button onclick="regenerateAI()"><i class="fa-solid fa-rotate-right"></i> Regenerar</button>
+                    </div>
+                `;
+            }
+
+            let formattedText = text.replace(/```([\s\S]*?)```/g, (match, p1) => {
+                return `<div class="code-block-wrapper"><pre><code>${p1}</code></pre><button class="copy-code-btn" onclick="copyCodeBlock(this)"><i class="fa-solid fa-code"></i> Copiar Código</button></div>`;
+            });
+
+            messageDiv.innerHTML = `<strong><i class="fa-solid ${sender === 'user' ? 'fa-user' : 'fa-robot'}"></i> ${senderName}:</strong><div class="msg-content">${formattedText}</div>${extraTools}`;
+            chatContainer.appendChild(messageDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        window.copyText = (btn) => {
+            const text = btn.closest('.message').querySelector('.msg-content').innerText;
+            navigator.clipboard.writeText(text);
+            alert("¡Texto copiado!");
+        };
+
+        window.copyCodeBlock = (btn) => {
+            const code = btn.previousElementSibling.innerText;
+            navigator.clipboard.writeText(code);
+            alert("¡Código copiado!");
+        };
+
+        window.loadCodeIntoEditor = (btn) => {
+            const messageBox = btn.closest('.message');
+            const codeBlock = messageBox.querySelector('code');
+            const rawContent = messageBox.querySelector('.msg-content').innerText;
+
+            codeEditor.value = codeBlock ? codeBlock.innerText : rawContent;
+            runCode();
+            alert("¡Código cargado en el editor por Vector!");
+        };
+
+        window.speakText = (btn) => {
+            const text = btn.closest('.message').querySelector('.msg-content').innerText;
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.lang = 'es-ES';
+            window.speechSynthesis.speak(utterance);
+        };
+
+        fileInput.addEventListener("change", async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const storageRef = ref(storage, `uploads/${currentUserId}/${Date.now()}_${file.name}`);
+            await uploadBytes(storageRef, file);
+            const url = await getDownloadURL(storageRef);
+            appendMessage("user", `[Archivo subido: <a href="${url}" target="_blank">${file.name}</a>]`);
+        });
+
+        async function callGeminiAPI(prompt) {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${GEMINI_API_KEY}`;
+            const response = await fetch(url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+            });
+            const data = await response.json();
+            try {
+                return data.candidates[0].content.parts[0].text;
+            } catch (err) {
+                return "Error al conectar con el núcleo de Vector.";
+            }
+        }
+
+        async function handleSendMessage() {
+            const text = userInput.value.trim();
+            if (!text) return;
+
+            appendMessage("user", text);
+            userInput.value = "";
+
+            const aiResponse = await callGeminiAPI(text);
+            appendMessage("ai", aiResponse);
+        }
+
+        sendBtn.addEventListener("click", handleSendMessage);
+        userInput.addEventListener("keypress", (e) => { if (e.key === "Enter") handleSendMessage(); });
+
+        function runCode() {
+            const code = codeEditor.value;
+            const outputFrame = document.getElementById("code-output").contentWindow.document;
+            outputFrame.open();
+            outputFrame.write(code);
+            outputFrame.close();
+        }
+
+        runCodeBtn.addEventListener("click", runCode);
+    </script>
+</head>
+<body>
+    <div id="auth-screen" class="auth-container">
+        <h2><i class="fa-solid fa-terminal"></i> VitaxOS Auth</h2>
+        <input type="email" id="auth-email" placeholder="Correo electrónico">
+        <input type="password" id="auth-pass" placeholder="Contraseña">
+        <div class="auth-buttons" style="display:flex; gap:10px; width:100%;">
+            <button onclick="handleLogin()" style="flex:1;"><i class="fa-solid fa-right-to-bracket"></i> Entrar</button>
+            <button onclick="handleRegister()" style="flex:1;"><i class="fa-solid fa-user-plus"></i> Registrar</button>
+        </div>
+    </div>
+
+    <div id="app-screen" class="app-wrapper" style="display:none;">
+        <header>
+            <h1><i class="fa-solid fa-microchip"></i> Vector AI Suite</h1>
+            <button onclick="handleLogout()" class="logout-btn"><i class="fa-solid fa-power-off"></i> Salir</button>
+        </header>
+        
+        <div class="workspace">
+            <div class="chat-section">
+                <div id="chat-container" class="chat-container"></div>
+                <div class="input-area">
+                    <input type="file" id="file-input" style="display:none">
+                    <button onclick="document.getElementById('file-input').click()" title="Adjuntar archivo"><i class="fa-solid fa-paperclip"></i></button>
+                    <input type="text" id="user-input" placeholder="Pregúntale algo a Vector..." autocomplete="off">
+                    <button id="send-btn"><i class="fa-solid fa-paper-plane"></i></button>
+                </div>
+            </div>
+
+            <div class="editor-section">
+                <div class="editor-header">
+                    <h3><i class="fa-solid fa-code"></i> Preview en Vivo</h3>
+                    <button id="run-code-btn"><i class="fa-solid fa-play"></i> Ejecutar</button>
+                </div>
+                <textarea id="code-editor" placeholder="El código de Vector aparecerá aquí..."></textarea>
+                <iframe id="code-output"></iframe>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
